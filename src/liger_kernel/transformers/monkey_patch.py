@@ -17,6 +17,8 @@ from liger_kernel.transformers.model.gemma import lce_forward as gemma_lce_forwa
 from liger_kernel.transformers.model.gemma import lce_forward_deprecated as gemma_lce_forward_deprecated
 from liger_kernel.transformers.model.gemma2 import lce_forward as gemma2_lce_forward
 from liger_kernel.transformers.model.gemma2 import lce_forward_deprecated as gemma2_lce_forward_deprected
+from liger_kernel.transformers.model.solar import lce_forward as solar_lce_forward
+from liger_kernel.transformers.model.solar import lce_forward_deprecated as solar_lce_forward_deprecated
 from liger_kernel.transformers.model.llama import lce_forward as llama_lce_forward
 from liger_kernel.transformers.model.llama import lce_forward_deprecated as llama_lce_forward_deprecated
 from liger_kernel.transformers.model.mistral import lce_forward as mistral_lce_forward
@@ -375,6 +377,76 @@ def apply_liger_kernel_to_mistral(
                 _patch_rms_norm_module(decoder_layer.input_layernorm)
                 _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
+def apply_liger_kernel_to_solar(
+    rope: bool = True,
+    cross_entropy: bool = False,
+    fused_linear_cross_entropy: bool = True,
+    rms_norm: bool = True,
+    swiglu: bool = True,
+    model: PreTrainedModel = None,
+) -> None:
+    """
+    Apply Liger kernels to replace original implementation in HuggingFace Llama models (2 and 3)
+
+    Args:
+        rope (bool): Whether to apply Liger's rotary position embedding. Default is True.
+        cross_entropy (bool): Whether to apply Liger's cross entropy loss. Default is False.
+        fused_linear_cross_entropy (bool):
+            Whether to apply Liger's fused linear cross entropy loss. Default is True.
+            `cross_entropy` and `fused_linear_cross_entropy` cannot both be True.
+            If `fused_linear_cross_entropy` is True, the logits will not be materialized but more memory efficient.
+        rms_norm (bool): Whether to apply Liger's RMSNorm. Default is True.
+        swiglu (bool): Whether to apply Liger's SwiGLU MLP. Default is True.
+        model (PreTrainedModel): The model instance to apply Liger kernels to, if the model has already been
+        loaded. Default is None.
+    """
+
+    assert not (cross_entropy and fused_linear_cross_entropy), (
+        "cross_entropy and fused_linear_cross_entropy cannot both be True."
+    )
+
+    from transformers.models.llama import modeling_llama
+    from transformers.models.llama.modeling_llama import LlamaModel
+
+    if rope:
+        modeling_llama.apply_rotary_pos_emb = liger_rotary_pos_emb
+    if rms_norm:
+        modeling_llama.LlamaRMSNorm = LigerRMSNorm
+    if swiglu:
+        modeling_llama.LlamaMLP = LigerSwiGLUMLP
+
+    if cross_entropy:
+        if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
+            from transformers.loss.loss_utils import nn
+
+            nn.functional.cross_entropy = liger_cross_entropy
+        else:
+            logger.warning(TRANSFORMER_DEPRECATION_WARNING)
+            modeling_llama.CrossEntropyLoss = LigerCrossEntropyLoss
+
+    if fused_linear_cross_entropy:
+        if transformer_version >= version.parse(SUPPORTED_TRANSFORMER_VERSION):
+            modeling_llama.LlamaForCausalLM.forward = solar_lce_forward
+        else:  # if version < 4.46.1
+            logger.warning(TRANSFORMER_DEPRECATION_WARNING)
+            modeling_llama.LlamaForCausalLM.forward = solar_lce_forward_deprecated
+
+    if model is not None:
+        # The model instance already exists, so we need to additionally patch the
+        # instance variables that reference already-instantiated modules (e.g. LlamaRMSNorm or LlamaMLP)
+
+        # get the base model from the model instance
+        base_model: LlamaModel = getattr(model, model.base_model_prefix, model)
+
+        if rms_norm:
+            _patch_rms_norm_module(base_model.norm)
+
+        for decoder_layer in base_model.layers:
+            if swiglu:
+                _bind_method_to_module(decoder_layer.mlp, "forward", LigerSwiGLUMLP.forward)
+            if rms_norm:
+                _patch_rms_norm_module(decoder_layer.input_layernorm)
+                _patch_rms_norm_module(decoder_layer.post_attention_layernorm)
 
 def apply_liger_kernel_to_mixtral(
     rope: bool = True,

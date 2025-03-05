@@ -213,6 +213,16 @@ def supports_bfloat16():
     else:
         return False
 
+def revert_liger_kernel_to_solar(model_config: MiniModelConfig):
+    """
+    Revert all Liger kernel patches applied to Granite.
+    """
+    from transformers.models.llama import modeling_llama
+
+    importlib.reload(modeling_llama)
+    model_config.model_class = modeling_llama.LlamaForCausalLM
+    print("Liger kernel patches have been reverted.")
+
 
 def revert_liger_kernel_to_granite(model_config: MiniModelConfig):
     """
